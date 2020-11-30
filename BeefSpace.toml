@@ -1,0 +1,6 @@
+FileVersion = 1
+Projects = {iBuddy = {Path = "."}, Beefy2D = "*"}
+Unlocked = ["Beefy2D", "corlib"]
+
+[Workspace]
+StartupProject = "iBuddy"

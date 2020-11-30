@@ -1,0 +1,14 @@
+FileVersion = 1
+Dependencies = {corlib = "*", Beefy2D = "*"}
+
+[Project]
+Name = "iBuddy"
+TargetType = "BeefGUIApplication"
+StartupObject = "iBuddy.Program"
+
+[Platform.Windows]
+IconFile = "icon.ico"
+
+[Configs.Debug.Win64]
+TargetDirectory = "$(WorkspaceDir)\\dist"
+TargetName = "$(ProjectName)_d"
