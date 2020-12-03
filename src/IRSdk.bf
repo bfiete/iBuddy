@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using iBuddy;
 using System.Diagnostics;
+using System.IO;
 
 namespace iRacing
 {
@@ -334,6 +335,13 @@ namespace iRacing
 			public int32 sessionRecordCount;
 		}
 
+		public enum DeltaTime
+		{
+			case Awaiting;
+			case Missed;
+			case Delta(float time);
+		}
+
 		public class Driver
 		{
 			public String mName = new .() ~ delete _;
@@ -342,7 +350,6 @@ namespace iRacing
 			public bool mIsPaceCar;
 			public bool mIsSpectator;
 			public int32 mUserId;
-			public int32 mCarId;
 			public int32 mLastSessionId;
 			public int32 mIRating;
 			public float mIRatingChange;
@@ -360,6 +367,7 @@ namespace iRacing
 			public int32 mCalcLap = -1;
 			public float mEstTime;
 			public bool mOnPitRoad;
+			public List<double> mLapStartTicks = new .() ~ delete _;
 			public double mLapUnknownTime;
 			public double mLapLastUnknownTime;
 			public double mLastDistPctRecvTick;
@@ -384,14 +392,17 @@ namespace iRacing
 			public int32 mPitLap = -1;
 			public int32 mCurPitLap = -1;
 			public float mPitEnterLapDistPct = -1;
-			public double mLastPitEnterTime = -1;
-			public double mPitEnterTime;
-			public double mPitLeaveTime;
+			public double mLastPitEnterTick = -1;
+			public double mPitEnterTick;
+			public double mPitLeaveTick;
 			public float mPitTime;
+			public float mPitLapExtraTime;
 			public int32 mPitFinishCount;
+			public bool mWhiteFlagged;
+			public bool mCheckerFlagged;
 
 			public List<float> mRaceLapHistory = new .() ~ delete _;
-			public List<float?> mDeltas = new .() ~ delete _;
+			public List<DeltaTime> mDeltas = new .() ~ delete _;
 
 			public bool IsOnTrack
 			{
@@ -460,10 +471,21 @@ namespace iRacing
 			public int32 mRelSpeed;
 		}
 
+		public class StreamRecordInfo
+		{
+			public FileStream mFile ~ delete _;
+			public Stopwatch mTimer ~ delete _;
+			public uint8* mDataPrev ~ delete _;
+			public uint8* mDataCur ~ delete _;
+		}
+
+		StreamRecordInfo mStreamRecordInfo ~ delete _;
 		Windows.Handle mFileMapping;
 		void* mSharedMemory;
+		int mSharedMemorySize;
 		Windows.EventHandle mDataEvent;
 		Header* mHeader;
+
 		public Dictionary<StringView, VarHeader*> mVarMap = new .() ~ delete _;
 		public Dictionary<int32, ClassInfo> mClassMap = new .() ~
 			{
@@ -510,6 +532,8 @@ namespace iRacing
 		public float mTrackTempCrew;
 		public float mTrackLength;
 		public String mTrackName = new .() ~ delete _;
+		public bool mGuessWhiteFlagged;
+		public int32 mSessionHighestLap;
 
 		public float mEstLaps;
 		public int mPrevMostLaps;
@@ -538,15 +562,29 @@ namespace iRacing
 			}
 		}
 
+		public bool IsRecordingStream
+		{
+			get
+			{
+				return mStreamRecordInfo != null;
+			}
+		}
+
 		public Driver FocusedDriver
 		{
 			get
 			{
+				Driver driver = null;
 				if (mCamCarIdx >= 0)
-					return mDrivers[mCamCarIdx];
+					driver = mDrivers[mCamCarIdx];
 				if (mDriverCarIdx >= 0)
-					return mDrivers[mDriverCarIdx];
-				return null;
+					driver = mDrivers[mDriverCarIdx];
+				if (driver != null)
+				{
+					if ((driver.mIsPaceCar) || (driver.mIsSpectator))
+						driver = null;
+				}
+				return driver;
 			}
 		}
 
@@ -562,6 +600,96 @@ namespace iRacing
 		{
 			for (int carNum < cCarCount)
 				mDrivers.Add(null);
+		}
+
+		enum SECTION_INFORMATION_CLASS
+		{
+		    SectionBasicInformation,
+		    SectionImageInformation
+		};
+
+		[CRepr]
+		struct SECTION_BASIC_INFORMATION
+		{
+		    public void* BaseAddress;
+		    public uint32 AllocationAttributes;
+		    public uint64 MaximumSize;
+		}
+
+
+		public Result<void> StartRecording(StringView filePath)
+		{
+			DeleteAndNullify!(mStreamRecordInfo);
+			mStreamRecordInfo = new .();
+			mStreamRecordInfo.mFile = new .();
+			if (mStreamRecordInfo.mFile.Create(filePath, .Write) case .Err)
+			{
+				DeleteAndNullify!(mStreamRecordInfo);
+				return .Err;
+			}
+
+			mStreamRecordInfo.mTimer = new Stopwatch();
+			mStreamRecordInfo.mTimer.Start();
+			mStreamRecordInfo.mFile.Write((int32)mSharedMemorySize);
+
+			mStreamRecordInfo.mDataCur = new uint8[mSharedMemorySize]*;
+			mStreamRecordInfo.mDataPrev = new uint8[mSharedMemorySize]*;
+			
+			return .Ok;
+		}
+
+		public void WriteFrame()
+		{
+			mStreamRecordInfo.mFile.Write((int32)mStreamRecordInfo.mTimer.ElapsedMilliseconds);
+
+			Internal.MemCpy(mStreamRecordInfo.mDataCur, mSharedMemory, mSharedMemorySize);
+
+			var data = mStreamRecordInfo.mDataCur;
+			var prevData = mStreamRecordInfo.mDataPrev;
+
+			List<uint8> buf = scope .(64*1024);
+
+			int prevIdx = -1;
+			for (int i = 0; i < mSharedMemorySize; i++)
+			{
+				if (data[i] != prevData[i])
+				{
+					int delta = i - prevIdx - 1;
+					if (delta > 0xFFFF)
+					{
+						buf.Add(0xA3);
+						buf.AddRange(.((.)&delta, 4));
+					}
+					else if (delta > 0xFF)
+					{
+						buf.Add(0xA2);
+						buf.AddRange(.((.)&delta, 2));
+					}
+					else if (delta > 0)
+					{
+						buf.Add(0xA1);
+						buf.Add((.)delta);
+					}
+
+					if ((data[i] >= 0xA0) && (data[i] <= 0xA4))
+					{
+						buf.Add(0xA0);
+					}
+					buf.Add(data[i]);
+
+					prevIdx = i;
+				}
+			}
+			buf.Add(0xA4);
+
+			mStreamRecordInfo.mFile.TryWrite(buf);
+			
+			Internal.MemCpy(mStreamRecordInfo.mDataPrev, mStreamRecordInfo.mDataCur, mSharedMemorySize);
+		}
+
+		public void StopRecording()
+		{
+			DeleteAndNullify!(mStreamRecordInfo);
 		}
 
 		public void Close()
@@ -587,6 +715,15 @@ namespace iRacing
 				Close();
 				return .Err;
 			}
+
+			function uint32 (Windows.Handle sectionHandle, SECTION_INFORMATION_CLASS informationClass, void* outInformationBuffer, int32 informationBufferSize, int* outResultLength) pfnNtQuerySection;
+			pfnNtQuerySection = (.) Windows.GetProcAddress(Windows.GetModuleHandleA("ntdll.dll"), "NtQuerySection");
+
+			SECTION_BASIC_INFORMATION sbi = default;
+			int ucbRead = 0;
+#unwarn
+			var ntResult = pfnNtQuerySection(mFileMapping, .SectionBasicInformation, &sbi, sizeof(SECTION_BASIC_INFORMATION), &ucbRead);
+			mSharedMemorySize = (int32)sbi.MaximumSize;
 
 			mSharedMemory = Windows.MapViewOfFile(mFileMapping, Windows.FILE_MAP_READ, 0, 0, 0);
 
@@ -774,6 +911,11 @@ namespace iRacing
 		    EloRating(ref Ra, ref Rb, K, d); 
 		}*/ 
 
+		public void UpdateThread()
+		{
+
+		}
+
 		public void Update()
 		{
 			if (!IsInitialized)
@@ -781,6 +923,9 @@ namespace iRacing
 				if (Init() case .Err)
 					return;
 			}
+
+			if (mStreamRecordInfo != null)
+				WriteFrame();
 
 			mVarMap.Clear();
 			mHeader = (Header*)mSharedMemory;
@@ -1183,7 +1328,44 @@ namespace iRacing
 				}
 				else if ((driver.mLap > driver.mCalcLap) && (driver.mLapDistPct < 0.5f))
 				{
+					if (driver.mLap > mSessionHighestLap)
+					{
+						if ((session.mKind == .Race) && (driver.mBestLapTime >= mSessionTimeRemain))
+							mGuessWhiteFlagged = true;
+						mSessionHighestLap = driver.mLap;
+					}
+
+					if ((mSessionFlags.HasFlag(.checkered)) || (driver.mWhiteFlagged))
+					{
+						driver.mCheckerFlagged = true;
+					}
+
+					if (mSessionFlags.HasFlag(.white))
+					{
+						driver.mWhiteFlagged = true;
+						mGuessWhiteFlagged = true;
+					}
+					else
+					{
+						if ((driver == focusedDriver) && (mGuessWhiteFlagged))
+						{
+							// Oops- we were wrong!
+							for (var driver in mDrivers)
+							{
+								if (driver == null)
+									continue;
+								driver.mWhiteFlagged = false;
+								driver.mCheckerFlagged = false;
+							}
+							mGuessWhiteFlagged = false;
+						}
+
+						if (mGuessWhiteFlagged)
+							driver.mWhiteFlagged = true;
+					}
+
 					driver.mCalcLap = driver.mLap;
+					driver.mLapStartTicks.Add(mSessionTime);
 
 					if (driver == focusedDriver)
 					{
@@ -1209,23 +1391,23 @@ namespace iRacing
 						driver.mCurPitLap = driver.mCalcLap + 1;
 					else
 						driver.mCurPitLap = driver.mLap;
-					if (driver.mPitEnterTime == 0)
+					if (driver.mPitEnterTick == 0)
 					{
 						//float timeSinceLeave = (float)(mSessionTime - driver.mPitLeaveTime);
 						//if ((timeSinceLeave < 30) && (driver.mPitLeaveTime > 0))
-						if (driver.mLastPitEnterTime > 0)
+						if (driver.mLastPitEnterTick > 0)
 						{
 							//Debug.WriteLine($"{driver.mName} Entering Pits - extending. Time: {timeLeftStr}");
 
 							driver.mPitTime = 0; // Reset
-							driver.mPitEnterTime = driver.mLastPitEnterTime;
+							driver.mPitEnterTick = driver.mLastPitEnterTick;
 						}
 						else
 						{
 							//Debug.WriteLine($"{driver.mName} Entering Pits - NEW. Time: {timeLeftStr}");
 
 							driver.mPitTime = 0; // Reset
-							driver.mPitEnterTime = mSessionTime;
+							driver.mPitEnterTick = mSessionTime;
 						}
 					}
 
@@ -1234,9 +1416,9 @@ namespace iRacing
 				}
 				else
 				{
-					if (driver.mPitEnterTime > 0)
+					if (driver.mPitEnterTick > 0)
 					{
-						float curPitTime = (float)(mSessionTime - driver.mPitEnterTime);
+						float curPitTime = (float)(mSessionTime - driver.mPitEnterTick);
 
 						// Filter out fake pittings
 						if (curPitTime > 10.0f)
@@ -1253,12 +1435,12 @@ namespace iRacing
 						}
 
 						driver.mCurPitLap = -1;
-						driver.mPitLeaveTime = mSessionTime;
-						driver.mLastPitEnterTime = driver.mPitEnterTime;
-						driver.mPitEnterTime = 0;
+						driver.mPitLeaveTick = mSessionTime;
+						driver.mLastPitEnterTick = driver.mPitEnterTick;
+						driver.mPitEnterTick = 0;
 					}
 
-					if ((driver.mLastPitEnterTime >= 0) && (driver.mPitEnterLapDistPct >= 0))
+					if ((driver.mLastPitEnterTick >= 0) && (driver.mPitEnterLapDistPct >= 0))
 					{
 						float distDelta = driver.mLapDistPct - driver.mPitEnterLapDistPct;
 						if (distDelta < 0)
@@ -1266,7 +1448,7 @@ namespace iRacing
 						if (distDelta >= 0.5f)
 						{
 							// We've made it halfway around the track since getting the last pit signal
-							driver.mLastPitEnterTime = -1;
+							driver.mLastPitEnterTick = -1;
 							//Debug.WriteLine($"{driver.mName} Clearing pit enter time");
 						}
 					}
@@ -1287,6 +1469,17 @@ namespace iRacing
 						driver.mPitTime = driver.mLastLapTime - driver.mBestLapTime;
 					}
 
+					if ((driver.mPitLap == driver.mLatchLap) && (driver.mPitTime > 0) && (driver.mLapStartTicks.Count >= 3))
+					{
+						//
+						float lastTwoLapTime = (float)(driver.mLapStartTicks.Back - driver.mLapStartTicks[driver.mLapStartTicks.Count - 3]);
+						float pitLapExtraTime = Math.Max(lastTwoLapTime - driver.mLatchedBestLapTime * 2, 0);
+
+						// Take minimum 'extra lap time'. That will tend to drive our racesim to produce more conservative results
+						if ((driver.mPitLapExtraTime == 0) || (pitLapExtraTime < driver.mPitLapExtraTime))
+							driver.mPitLapExtraTime = pitLapExtraTime;
+					}
+
 					driver.mLapLastUnknownTime = driver.mLapUnknownTime;
 					driver.mLapUnknownTime = 0;
 
@@ -1302,7 +1495,9 @@ namespace iRacing
 						{
 							if (checkDriver == null)
 								continue;
-							checkDriver.mDeltas.Add(null);
+							if ((!checkDriver.mDeltas.IsEmpty) && (checkDriver.mDeltas.Back case .Awaiting))
+								checkDriver.mDeltas.Back = .Missed;
+							checkDriver.mDeltas.Add(.Awaiting);
 							if (checkDriver.mDeltas.Count > 3)
 								checkDriver.mDeltas.RemoveAt(0);
 						}
@@ -1338,13 +1533,34 @@ namespace iRacing
 				if (driver.mLapDistPct < 0.8f)
 					driver.mSoftLap = lap;*/
 
-				if ((driver.mDeltas.Count > 0) && (driver.mDeltas.Back == null) && (focusedDriver != null))
+				
+				if ((driver.mDeltas.Count > 0) && (driver.mDeltas.Back case .Awaiting) && (focusedDriver != null))
 				{
 				   if ((driver.mQueuedDeltaLapTime > 0) && (focusedDriver.mLastLapTime > 0))
 					{
-						driver.mDeltas.Back = driver.mQueuedDeltaLapTime - focusedDriver.mLastLapTime;
+						// Apply the delta time
+						driver.mDeltas.Back = .Delta(driver.mQueuedDeltaLapTime - focusedDriver.mLatchLapTime);
 						driver.mQueuedDeltaLapTime = 0;
 					}
+				}
+
+				// Don't keep an "awaiting" slot for a driver in front of the focused driver
+				if ((driver.mQueuedDeltaLapTime > 0) && (focusedDriver != null) && (focusedDriver.IsAheadOf(driver)))
+				{
+					if ((driver.mDeltas.Count > 0) && ((driver.mDeltas.Back case .Delta(var deltaTime))))
+					{
+						// Add the delta time to the previous delta
+						driver.mDeltas.Back = .Delta(driver.mQueuedDeltaLapTime - focusedDriver.mLatchLapTime + deltaTime);
+					}
+
+					// If the focuedDriver is ahead of this driver then clear their latched time so we can have a fresh time to compare to
+					driver.mQueuedDeltaLapTime = 0;
+				}
+
+				// Don't keep an "awaiting" slot for a driver in front of the focused driver
+				if ((driver.mDeltas.Count > 0) && (driver.mDeltas.Back case .Awaiting) && (focusedDriver != null) && (driver.IsAheadOf(focusedDriver)))
+				{
+					driver.mDeltas.Back = .Missed;
 				}
 
 				double pctDelta = driver.mLapDistPct - prevLapDist;
@@ -1365,10 +1581,13 @@ namespace iRacing
 				mFuelLevelHistory.Clear();
 				mLastLapFuelLevel = 0;
 				mFinishedRace = false;
+				mSessionHighestLap = 0;
+				mGuessWhiteFlagged = false;
 				for (var driver in mDrivers)
 				{
 					if (driver == null)
 						continue;
+					driver.mLapStartTicks.Clear();
 					driver.mCalcLap = driver.mLap;
 					driver.mCalcClassPosition = driver.mClassPosition;
 					driver.mLatchedBestLapTime = 0;
@@ -1376,10 +1595,12 @@ namespace iRacing
 					driver.mLatchLap = 0;
 					driver.mPitLap = -1;
 					driver.mPitTime = 0;
-					driver.mLastPitEnterTime = 0;
-					driver.mPitEnterTime = 0;
-					driver.mPitLeaveTime = 0;
+					driver.mLastPitEnterTick = 0;
+					driver.mPitEnterTick = 0;
+					driver.mPitLeaveTick = 0;
 					driver.mPitFinishCount = 0;
+					driver.mWhiteFlagged = false;
+					driver.mCheckerFlagged = false;
 					driver.mDeltas.Clear();
 				}
 			}
@@ -1507,6 +1728,7 @@ namespace iRacing
 				if (driver == null)
 					continue;
 
+				// Calculate irating change
 				ClassInfo classData = null;
 				mClassMap.TryGetValue(driver.mCarClass, out classData);
 

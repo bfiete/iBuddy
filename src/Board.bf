@@ -5,6 +5,7 @@ using iRacing;
 using System.Collections;
 using System.Diagnostics;
 using Beefy.gfx;
+using System.IO;
 
 namespace iBuddy
 {
@@ -79,6 +80,17 @@ namespace iBuddy
 		float mMouseDownX;
 		float mMouseDownY;
 		bool mWantStandingDisplay;
+		RaceSim mRefRaceSim ~ delete _;
+		List<int32> mSimEndLaps = new .() ~ delete _;
+		int32 mSimEstEndLap;
+		float mSimEstEndLapAvg;
+
+		public bool mWasOnPitRoad;
+		public float mRefuelAddAmt;
+		public float mRefuelStartLevel;
+		public float mRefuelSimAmt;
+		public int32 mRefuelEstLaps;
+		public bool mGotCheckered;
 
 		public void GetActiveDrivers(List<IRSdk.Driver> driverList, out float refLapTime)
 		{
@@ -179,11 +191,6 @@ namespace iBuddy
 			int32 infoUpdateIdx = mUpdateCnt / 15;
 			if (driverInfo.mLastInfoUpdateIdx != infoUpdateIdx)
 			{
-				if (driver.mName.Contains("Cisco"))
-				{
-					NOP!();
-				}
-
 				driverInfo.mLastInfoUpdateIdx = infoUpdateIdx;
 
 				float secDiff = -1;
@@ -420,9 +427,9 @@ namespace iBuddy
 			if ((session.mKind == .Race) && (driver.mCarClass == focusDriver.mCarClass))
 			{
 				pitTime = driver.mPitTime;
-				if (driver.mPitEnterTime > 0)
+				if (driver.mPitEnterTick > 0)
 				{
-					float curPitTime = (float)(irSdk.mSessionTime - driver.mPitEnterTime);
+					float curPitTime = (float)(irSdk.mSessionTime - driver.mPitEnterTick);
 					if (curPitTime >= 3)
 					{
 						onPitRoad = true;
@@ -654,12 +661,8 @@ namespace iBuddy
 					String deltaStr = scope String(16);
 					uint32 deltaColor;
 					float fontYOfs = lgFontYOfs;
-					if (delta == null)
-					{
-						deltaColor = 0xFFFFFFFF;
-						deltaStr.Append("-");
-					}
-					else
+
+					if (delta case .Delta(float deltaTime))
 					{
 						if (driver == focusDriver)
 							deltaColor = driverColor;
@@ -668,7 +671,7 @@ namespace iBuddy
 							if (driver.mCarClass == focusDriver.mCarClass)
 							{
 								g.SetFont(gApp.mLgMonoFont);
-								if (delta.Value >= 0)
+								if (deltaTime >= 0)
 									deltaColor = 0xFF30A838;
 								else
 									deltaColor = 0xFFEC433B;
@@ -677,21 +680,33 @@ namespace iBuddy
 							{
 								fontYOfs = medFontYOfs;
 								g.SetFont(gApp.mMedMonoFont);
-								if (delta.Value >= 0)
+								if (deltaTime >= 0)
 									deltaColor = 0xFF407040;
 								else
 									deltaColor = 0xFFA06060;
 							}
 						}
 
-						float deltaVal = Math.Abs(delta.Value);
+						float deltaVal = Math.Abs(deltaTime);
 						if (deltaVal > 9.99)
 							deltaStr.AppendF("{}", (int)Math.Round(deltaVal));
 						else
 							deltaStr.AppendF("{:0.0}", deltaVal);
 					}
+					else
+					{
+						deltaColor = 0xFFFFFFFF;
+						deltaStr.Append("-");
+					}
+
 					using (g.PushColor(deltaColor))
 						g.DrawString(deltaStr, deltasX + @delta.Index * 44, fontYOfs, .Centered);
+				}
+
+				if (driver.mQueuedDeltaLapTime != 0)
+				{
+					using (g.PushColor(0xFFA0A0A0))
+						g.FillRect(deltasX + 108, 8, 2, 2);
 				}
 			}
 
@@ -829,6 +844,11 @@ namespace iBuddy
 			return refUsage;
 		}
 
+		float LiterToDispUnit(float liters)
+		{
+			return liters * 0.264172f;
+		}
+
 		void DrawFuel(Graphics g)
 		{
 			var irSdk = gApp.mIRSdk;
@@ -848,11 +868,6 @@ namespace iBuddy
 			float refUsage = GetRefFuelUsage();
 			float needFuel = refUsage * Math.Ceiling(lapsLeft);
 
-			float LiterToDispUnit(float liters)
-			{
-				return liters * 0.264172f;
-			}
-			
 			if (refUsage > 0)
 			{
 				float fuelLapsLeft = irSdk.mFuelLevel / refUsage;
@@ -884,7 +899,9 @@ namespace iBuddy
 					}
 				}
 
-				bool showLevel = true;
+				bool showLevel = false;
+				if (irSdk.mSessionState == .StateCheckered)
+					showLevel = true;
 				bool isMultiline = refueling || showLevel;
 
 				if (isMultiline)
@@ -977,14 +994,25 @@ namespace iBuddy
 			float relDriverY = 188;
 
 			uint32 flagColor = 0;
+			bool isGuessedFlag = false;
 			if (irSdk.mSessionFlags.HasFlag(.checkered))
 				flagColor = 0xFF808080;
 			else if (irSdk.mSessionFlags.HasFlag(.white))
 				flagColor = 0xFFFFFFFF;
+			else if (irSdk.mGuessWhiteFlagged)
+			{
+				isGuessedFlag = true;
+				flagColor = 0xFFFFFFFF;
+			}
 			if (flagColor != 0)
 			{
 				using (g.PushColor(Color.Mult(flagColor, Color.Get(0.8f + Math.Sin(mUpdateCnt * 0.12f) * 0.2f))))
 					g.FillRect(6, 24, 40, 20);
+				if (isGuessedFlag)
+				{
+					using (g.PushColor(0xFF000000))
+						g.DrawString("?", 6, 18, .Centered, 40);
+				}
 			}
 
 			float trackTemp = (irSdk.mTrackTempCrew * 9/5) + 32;
@@ -1191,6 +1219,8 @@ namespace iBuddy
 
 				if (session.mLaps > 0)
 					g.DrawString(scope $"Lap {showLap}/{session.mLaps}", mWidth/2, botRowY, .Centered);
+				else if (mSimEstEndLapAvg > 0)
+					g.DrawString(scope $"Lap {showLap}/~{mSimEstEndLapAvg:0.0}", mWidth/2, botRowY, .Centered);
 				else if ((irSdk.mEstLaps > 0) && (!isQualifying))
 					g.DrawString(scope $"Lap {showLap}/~{irSdk.mEstLaps:0.00}", mWidth/2, botRowY, .Centered);
 				else
@@ -1261,14 +1291,16 @@ namespace iBuddy
 			}*/
 		}
 
-		public void Simulate(float refLapTime)
+		public void SetupRefSim(float refLapTime)
 		{
+			DeleteAndNullify!(mRefRaceSim);
+
 			var irSdk = gApp.mIRSdk;
 			var focusedDriver = irSdk.FocusedDriver;
 			if ((focusedDriver == null) || (!focusedDriver.IsOnTrack))
 				return;
 
-			RaceSim sim = scope .(0);
+			RaceSim sim = new .(0);
 			sim.mPitStopRequired = true;
 
 			float lapsLeft = GetLapsLeft();
@@ -1278,6 +1310,11 @@ namespace iBuddy
 
 			List<float> pitTimes = scope .();
 			pitTimes.Add(40);
+
+			if (irSdk.mSessionFlags.HasFlag(.white))
+			{
+				sim.mOnLastLap = true;
+			}
 
 			int focusedSimDriverIdx = -1;
 			sim.mTimeLeft = irSdk.mSessionTimeRemain;
@@ -1291,7 +1328,7 @@ namespace iBuddy
 					RaceSim.Driver simDriver = new .();
 
 					simDriver.mName = new String(driver.mName);
-
+					simDriver.mDriverIdx = driver.mIdx;
 					simDriver.mBestLapTime = driver.mLatchedBestLapTime;
 					if (simDriver.mBestLapTime <= 0)
 						simDriver.mBestLapTime = refLapTime;
@@ -1301,20 +1338,62 @@ namespace iBuddy
 
 					//TODO: Handle endurance races better.
 					// Perhaps simulate a chance that a driver has to pit for a splash
-					if (driver == focusedDriver)
+
+					if ((driver.mPitEnterTick > 0) && (driver.mLapStartTicks.Count >= 3))
 					{
-						// The point is that we are IN the pit lane right now...
-						simDriver.mMustRefuel = 1.0f;
+						float curPitTime = (float)(irSdk.mSessionTime - driver.mPitEnterTick);
+						if (curPitTime > 2.0f)
+						{
+							float lapTimeA = (float)(irSdk.mSessionTime - driver.mLapStartTicks[driver.mLapStartTicks.Count - 1]);
+							float lapTimeB = (float)(irSdk.mSessionTime - driver.mLapStartTicks[driver.mLapStartTicks.Count - 2]);
+							float lapTimeC = (float)(irSdk.mSessionTime - driver.mLapStartTicks[driver.mLapStartTicks.Count - 3]);
+
+							//float curTwoLapTime = (lapTimeA < driver.mBestLapTime * 95f) ? lapTimeB : a;
+
+							float curTwoLapTime = lapTimeB;
+							if (lapTimeA < driver.mBestLapTime * 0.95f)
+							{
+								curTwoLapTime = lapTimeC;
+							}
+
+							float curExtraTime = curTwoLapTime - driver.mBestLapTime * 2;
+
+							float timeInPit = (float)(irSdk.mSessionTime - driver.mPitEnterTick);
+
+							// We add mAvgPitLapExtraTime later
+							simDriver.mCurLapTimeOverride = simDriver.mBestLapTime - curExtraTime;
+
+							// Always consider the pit lane to be at the VERY start of a lap
+							simDriver.mLap = (int)simDriver.mLap + 0.001f;
+						}
 					}
-					else if ((driver.mPitTime >= 20) && (driver.mPitTime <= 120) && (driver.mPitLap > 3))
+
+					simDriver.mCheckerFlagged = driver.mCheckerFlagged;
+
+					if (driver.mWhiteFlagged)
 					{
-						pitTimes.Add(driver.mPitTime);
+						simDriver.mWhiteFlagged = true;
+						sim.mOnLastLap = true;
+					}
+
+					if (simDriver.mCurLapTimeOverride > 0)
+					{
+						// Handled
+					}
+					else if ((driver.mPitLapExtraTime >= 20) && (driver.mPitLapExtraTime <= 120) && (driver.mPitLap > 3))
+					{
+						pitTimes.Add(driver.mPitLapExtraTime);
 
 						float attemptedLapsWithoutRefueling = lapsLeft + (driver.mCalcLap - driver.mPitLap);
 						if (attemptedLapsWithoutRefueling > tankMaxLaps * 1.1)
 						{
 							// Not enough fuel
-							simDriver.mMustRefuel = 0.85f;
+							if (driver == focusedDriver)
+								simDriver.mMustRefuel = 1.0f;
+							else
+							{
+								simDriver.mMustRefuel = 0.85f;
+							}
 						}
 						else
 						{
@@ -1336,35 +1415,51 @@ namespace iBuddy
 				}
 			}
 
-			sim.mAvgPitTime = pitTimes[pitTimes.Count / 2];
+			pitTimes.Sort();
+			sim.mAvgPitLapExtraTime = pitTimes[(pitTimes.Count - 1) / 2];
 
-			Stopwatch sw = scope .();
-			sw.Start();
-			if (focusedSimDriverIdx != -1)
+			for (var simDriver in sim.mDrivers)
 			{
-				List<int32> lapList = scope .();
-
-				for (int32 simIdx < 1000)
-				{
-					var checkSim = sim.Duplicate(simIdx);
-					defer delete checkSim;
-
-					RaceSim.Driver focusedSimDriver = checkSim.mDrivers[focusedSimDriverIdx];
-					for (int i < 100000)
-					{
-						checkSim.Simulate();
-						if (focusedSimDriver.mCheckerFlagged)
-						{
-							lapList.Add((int32)focusedSimDriver.mLap);
-							break;
-						}	
-					}
-				}
-
-				lapList.Sort();
+				if (simDriver.mCurLapTimeOverride > 0)
+					simDriver.mCurLapTimeOverride += sim.mAvgPitLapExtraTime;
 			}
-			sw.Stop();
-			float elapsed = sw.ElapsedMilliseconds;
+
+			mRefRaceSim = sim;
+		}
+
+		public void Simulate()
+		{
+			if (mRefRaceSim == null)
+				return;
+
+			var irSdk = gApp.mIRSdk;
+			var focusedDriver = irSdk.FocusedDriver;
+			if (focusedDriver == null)
+				return;
+
+			var sim = mRefRaceSim.Duplicate(mUpdateCnt);
+			defer delete sim;
+
+
+			RaceSim.Driver focusedSimDriver = null;
+			for (var simDriver in sim.mDrivers)
+				if (simDriver.mDriverIdx == focusedDriver.mIdx)
+					focusedSimDriver = simDriver;
+
+			if (focusedSimDriver == null)
+				return;
+
+			while (true)
+			{
+				sim.Simulate();
+				if (focusedSimDriver.mCheckerFlagged)
+				{
+					mSimEndLaps.Add((int32)focusedSimDriver.mLap);
+					if (mSimEndLaps.Count > 500)
+						mSimEndLaps.RemoveAt(10);
+					break;
+				}
+			}
 		}
 
 		public override void Update()
@@ -1393,6 +1488,31 @@ namespace iBuddy
 			if (!irSdk.IsRunning)
 				return;
 
+			var focusedDriver = irSdk.FocusedDriver;
+
+			if (focusedDriver != null)
+			{
+				float curPitTime = (float)(irSdk.mSessionTime - focusedDriver.mPitEnterTick);
+				//bool onPitRoad = (focusedDriver.mOnPitRoad) && (curPitTime >= 2.0f);
+				bool onPitRoad = focusedDriver.mOnPitRoad;
+				if ((onPitRoad) && (!mWasOnPitRoad))
+				{
+					mRefuelStartLevel = irSdk.mFuelLevel;
+
+					double curLap = focusedDriver.mCalcLap + focusedDriver.mCalcLapDistPct;
+
+					float refUsage = GetRefFuelUsage();
+					float wantFuel = (float)((mSimEstEndLap - curLap) * refUsage);
+					float wantAddFuel = wantFuel - irSdk.mFuelLevel;
+					mRefuelSimAmt = wantAddFuel;
+					mRefuelEstLaps = mSimEstEndLap;
+				}
+				mWasOnPitRoad = onPitRoad;
+			}
+			
+			if (irSdk.mFuelAddKg > 0)
+				mRefuelAddAmt = irSdk.mFuelAddKg;
+
 			List<IRSdk.Driver> trackOrderList = scope .();
 			float refLapTime = 0;
 			GetActiveDrivers(trackOrderList, out refLapTime);
@@ -1402,7 +1522,6 @@ namespace iBuddy
 				session = irSdk.mSessions[irSdk.mSessionNum];
 			bool isRace = ((session != null) && (session.mType == "Race"));
 			
-			var focusedDriver = irSdk.FocusedDriver;
 			if (focusedDriver != null)
 			{
 				bool isPaceLap = isRace && (focusedDriver.mLap < 1);
@@ -1446,6 +1565,29 @@ namespace iBuddy
 				}
 			}
 
+			if ((irSdk.mSessionState == .StateRacing) && (isRace) && (focusedDriver != null) && (focusedDriver.mCalcLap >= 3))
+			{
+				if ((mUpdateCnt % 60) == 0)
+					SetupRefSim(refLapTime);
+
+				if ((mUpdateCnt % 2) == 0)
+					Simulate();
+			}
+
+			if (((mUpdateCnt % 60) == 0) && (mSimEndLaps.Count > 10))
+			{
+				List<int32> orderedSimEndLaps = scope .();
+				double total = 0;
+				for (var lap in mSimEndLaps)
+				{
+					orderedSimEndLaps.Add(lap);
+					total += lap;
+				}
+				orderedSimEndLaps.Sort();
+				mSimEstEndLap = orderedSimEndLaps[(orderedSimEndLaps.Count * 95) / 100];
+				mSimEstEndLapAvg = (float)(total / mSimEndLaps.Count);
+			}
+
 			UpdateTrackPct(refLapTime);
 
 			if (mWidgetWindow.IsKeyDown(.Control))
@@ -1461,6 +1603,20 @@ namespace iBuddy
 				{
 					Debug.WriteLine(sv);
 				}
+			}
+
+			if ((isRace) && (focusedDriver != null) && (irSdk.mSessionFlags.HasFlag(.checkered) && (!mGotCheckered) && (focusedDriver.mCalcLapDistPct < 0.25f)))
+			{
+				String logName = scope $"{gApp.mInstallDir}/fuel.log";
+				FileStream fs = scope .();
+				//fs.Open(logName, .Write, .None, 4096, .A)
+				if (fs.Open(logName, .Append, .Write) case .Ok)
+				{
+					StreamWriter sw = scope .(fs, .UTF8, 4096);
+					sw.WriteLine($"{DateTime.Now}\t{mTrack.mName}\t{focusedDriver.mCarClass}\t{LiterToDispUnit(GetRefFuelUsage()):0.00}\t{LiterToDispUnit(irSdk.mFuelLevelHistory.Back):0.00}\t{LiterToDispUnit(irSdk.mFuelLevel):0.00}\t{LiterToDispUnit(mRefuelStartLevel):0.00}\t{LiterToDispUnit(mRefuelAddAmt):0.00}\t{LiterToDispUnit(mRefuelSimAmt):0.00}\t{mRefuelEstLaps}\t{focusedDriver.mCalcLap}");
+				}
+
+				mGotCheckered = true;
 			}
 
 			/*if (isRace)
@@ -1509,13 +1665,13 @@ namespace iBuddy
 				}
 			}
 
-			if (keyCode == (.)'S')
+			/*if (keyCode == (.)'S')
 			{
 				List<IRSdk.Driver> trackOrderList = scope .();
 				float refLapTime = 0;
 				GetActiveDrivers(trackOrderList, out refLapTime);
 				Simulate(refLapTime);
-			}
+			}*/
 		}
 
 		public override void MouseDown(float x, float y, int32 btn, int32 btnCount)

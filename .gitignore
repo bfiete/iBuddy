@@ -1,6 +1,8 @@
 build/
 BeefSpace_User.toml
 dist/Beef*.dll
+dist/replay/
+fuel.log
 *.exe
 *.pdb
 *.build.txt

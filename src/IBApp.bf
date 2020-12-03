@@ -9,6 +9,8 @@ using Beefy.theme;
 using System;
 using Beefy.input;
 using System.Diagnostics;
+using System.Collections;
+using System.IO;
 
 namespace iBuddy
 {
@@ -77,15 +79,15 @@ namespace iBuddy
 			mMapPointerImage = Image.LoadFromFile(scope $"{mInstallDir}/images/MapPointer.png");
 			mChevronImage = Image.LoadFromFile(scope $"{mInstallDir}/images/Chevron.png");
 
-			mConfigWidget = new .();
-			mConfigWindow = new WidgetWindow(null, "iBuddy Config", GetWindowX(320), 200, 320, 240, .QuitOnClose | .Caption | .SysMenu | .Minimize, mConfigWidget);
-
 			DarkTheme aTheme = new DarkTheme();
 			aTheme.Init();
 			ThemeFactory.mDefault = aTheme;
 
 			mInputManager = new InputManager();
 			CheckInputDevices();
+
+			mConfigWidget = new .();
+			mConfigWindow = new WidgetWindow(null, "iBuddy Config", GetWindowX(320), 660, 320, 240, .QuitOnClose | .Caption | .SysMenu | .Minimize, mConfigWidget);
 		}
 
 		public void CheckInputDevices()
@@ -144,22 +146,64 @@ namespace iBuddy
 				mLapInputWindow.Close();
 		}
 
+		void CheckStartRecording()
+		{
+			List<Process> processList = scope .();
+			Process.GetProcesses(processList);
+			defer ClearAndDeleteItems(processList);
+
+			for (var process in processList)
+			{
+				if (process.ProcessName.Contains("iReplay"))
+					return;
+			}
+
+			for (var file in Directory.EnumerateFiles(scope $"{mInstallDir}/replay"))
+			{
+				var fileAge = DateTime.Now - file.GetLastWriteTime();
+				var totalDays = fileAge.TotalDays;
+				if (totalDays >= 7)
+				{
+					String filePath = scope .();
+					file.GetFilePath(filePath);
+					File.Delete(filePath).IgnoreError();
+				}
+			}
+
+			String filePath = scope $"{DateTime.Now:yyyy_MM_dd__HH_mm}";
+			filePath.Insert(0, scope $"{mInstallDir}/replay/");
+			filePath.Append(".dat");
+
+			String dir = scope .();
+			Path.GetDirectoryPath(filePath, dir);
+			Directory.CreateDirectory(dir).IgnoreError();
+
+			mIRSdk.StartRecording(filePath).IgnoreError();
+
+			return;
+		}
+
 		public override void Update(bool batchStart)
 		{
 			base.Update(batchStart);
 
 			mIRSdk.Update();
 
-			mLapInputState = Enum.Parse<LapInputState>(mConfigWidget.mRecordCombo.Label).GetValueOrDefault();
+			mLapInputState = Enum.Parse<LapInputState>(mConfigWidget.mRecordLapCombo.Label).GetValueOrDefault();
 
-			
+			bool wantRecording = (mConfigWidget.mRecordDataCheckbox.Checked) && (mBoard != null);
+			if (wantRecording)
+			{
+				if (!mIRSdk.IsRecordingStream)
+					CheckStartRecording();
+			}
+			else
+				mIRSdk.StopRecording();
 
 			if (mIRSdk.IsRunning)
 			{
 				if (mBoard == null)
 				{
-					
-
 					mBoard = new Board();
 					BFWindowBase.Flags windowFlags = default;
 					windowFlags |= .TopMost;

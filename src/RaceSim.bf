@@ -10,10 +10,13 @@ namespace iBuddy
 		public class Driver
 		{
 			public String mName ~ delete _;
+			public int32 mDriverIdx;
 			public int32 mClassNum;
 			public double mLap;
 			public float mBestLapTime;
 			public float mMustRefuel;
+			public bool mWhiteFlagged;
+			public bool mCheckerFlagged;
 
 			public float mSpeedFactor = 1.0f;
 
@@ -21,18 +24,17 @@ namespace iBuddy
 			public float mIncidentFactor;
 
 			public float mCarHealth = 1.0f;
-			public float mPitTimeLeft;
-			public bool mWhiteFlagged;
-			public bool mCheckerFlagged;
+			public float mCurLapTimeOverride; // Pit stops are simulated by forcing a slower-than-normal lap
 		}
 
 		public double mTimeLeft;
 		public List<Driver> mDrivers = new .() ~ DeleteContainerAndItems!(_);
-		public float mAvgPitTime;
+		public float mAvgPitLapExtraTime;
 		public bool mPitStopRequired;
 
 		public Random mRand ~ delete _;
 		public bool mOnLastLap;
+		public bool mCheckerFlagged;
 		public int32 mSimulateCount;
 
 		public this(int32 seed)
@@ -49,14 +51,18 @@ namespace iBuddy
 				var newDriver = new Driver();
 				if (driver.mName != null)
 					newDriver.mName = new String(driver.mName);
+				newDriver.mDriverIdx = driver.mDriverIdx;
 				newDriver.mClassNum = driver.mClassNum;
 				newDriver.mLap = driver.mLap;
 				newDriver.mBestLapTime = driver.mBestLapTime;
 				newDriver.mMustRefuel = driver.mMustRefuel;
+				newDriver.mWhiteFlagged = driver.mWhiteFlagged;
+				newDriver.mCheckerFlagged = driver.mCheckerFlagged;
 				rs.mDrivers.Add(newDriver);
 			}
-			rs.mAvgPitTime = mAvgPitTime;
+			rs.mAvgPitLapExtraTime = mAvgPitLapExtraTime;
 			rs.mPitStopRequired = mPitStopRequired;
+			rs.mOnLastLap = mOnLastLap;
 			return rs;
 		}
 
@@ -79,7 +85,7 @@ namespace iBuddy
 
 		public void Simulate()
 		{
-			float timeDelta = 1.0f;
+			float timeDelta = 5.0f;
 
 			if (mSimulateCount == 0)
 			{
@@ -98,12 +104,6 @@ namespace iBuddy
 				if (driver.mCheckerFlagged)
 					continue;
 
-				if (driver.mPitTimeLeft > 0)
-				{
-					driver.mPitTimeLeft -= timeDelta;
-					continue;
-				}
-
 				float speedFactor = driver.mSpeedFactor;
 				if (driver.mIncidentTimeLeft > 0)
 				{
@@ -113,7 +113,11 @@ namespace iBuddy
 
 				int prevLap = (int)driver.mLap;
 
-				double pctVel = (timeDelta / driver.mBestLapTime) * speedFactor;
+				float targetLapTime = driver.mBestLapTime;
+				if (driver.mCurLapTimeOverride > 0)
+					targetLapTime = driver.mCurLapTimeOverride;
+
+				double pctVel = (timeDelta / targetLapTime) * speedFactor;
 				driver.mLap += pctVel;
 
 				if ((int)driver.mLap > prevLap)
@@ -126,8 +130,11 @@ namespace iBuddy
 						driver.mPitTimeLeft = mAvgPitTime;
 					}*/
 
-					if (driver.mWhiteFlagged)
+					driver.mCurLapTimeOverride = 0;
+
+					if ((driver.mWhiteFlagged) || (mCheckerFlagged))
 					{
+						mCheckerFlagged = true;
 						driver.mCheckerFlagged = true;
 						continue;
 					}
@@ -142,14 +149,14 @@ namespace iBuddy
 					if (driver.mMustRefuel > 0)
 					{
 						driver.mMustRefuel = 0;
-						driver.mPitTimeLeft = mAvgPitTime;
+						driver.mCurLapTimeOverride = driver.mBestLapTime + mAvgPitLapExtraTime;
 					}
 				}
 
-				if (Rand() < 1/30.0f) // About every 30 seconds enter a new "speed factor"
+				if (Rand() < timeDelta/30.0f) // About every 30 seconds enter a new "speed factor"
 					driver.mSpeedFactor = 0.98f + Rand()*0.04f; // (-2% to +2%)
 
-				if (Rand() < 0.0001f)
+				if (Rand() < timeDelta/10000)
 				{
 					driver.mIncidentFactor = Rand();
 					driver.mIncidentTimeLeft = Rand()*4.0f + Rand()*4.0f + Rand()*4.0f;

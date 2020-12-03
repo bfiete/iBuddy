@@ -7,22 +7,21 @@ namespace iBuddy
 {
 	class ConfigWidget : Widget
 	{
-		public DarkComboBox mRecordCombo;
-
+		public DarkComboBox mRecordLapCombo;
+		public DarkCheckBox mRecordDataCheckbox;
 		
-
 		public this()
 		{
-			mRecordCombo = new DarkComboBox();
-			AddWidget(mRecordCombo);
-			mRecordCombo.mPopulateMenuAction.Add(new (menu) =>
+			mRecordLapCombo = new DarkComboBox();
+			AddWidget(mRecordLapCombo);
+			mRecordLapCombo.mPopulateMenuAction.Add(new (menu) =>
 				{
 					void AddItem(StringView label)
 					{
 						var item = menu.AddItem(label);
 						item.mOnMenuItemSelected.Add(new (menu) =>
 							{
-								mRecordCombo.Label = menu.mLabel;
+								mRecordLapCombo.Label = menu.mLabel;
 							});
 					}
 
@@ -30,14 +29,20 @@ namespace iBuddy
 					AddItem("Record");
 					AddItem("Compare");
 				});
-			mRecordCombo.Label = "Disabled";
+			mRecordLapCombo.Label = "Disabled";
+
+			mRecordDataCheckbox = new .();
+			mRecordDataCheckbox.Label = "Record Data";
+			//mRecordDataCheckbox.Checked = true;
+			AddWidget(mRecordDataCheckbox);
 
 			ResizeComponents();
 		}
 
 		void ResizeComponents()
 		{
-			mRecordCombo.Resize(8, 30, 200, 20);
+			mRecordLapCombo.Resize(8, 30, 200, 20);
+			mRecordDataCheckbox.Resize(8, 54, 200, 24);
 		}
 
 		public override void Update()
@@ -54,7 +59,7 @@ namespace iBuddy
 				g.FillRect(0, 0, mWidth, mHeight);
 
 			g.SetFont(DarkTheme.sDarkTheme.mSmallFont);
-			g.DrawString("Lap Input Recording", mRecordCombo.mX, mRecordCombo.mY - 20);
+			g.DrawString("Lap Input Recording", mRecordLapCombo.mX, mRecordLapCombo.mY - 20);
 		}
 	}
 }
