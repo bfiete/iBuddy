@@ -88,6 +88,7 @@ namespace iBuddy
 		public bool mWasOnPitRoad;
 		public float mRefuelAddAmt;
 		public float mRefuelStartLevel;
+		public float mRefuelMinStartLevel;
 		public float mRefuelSimAmt;
 		public int32 mRefuelEstLaps;
 		public bool mGotCheckered;
@@ -591,11 +592,6 @@ namespace iBuddy
 				float timeDiff = driverInfo.mTimeDiff;
 				if (drawKind == .Standings)
 				{
-					/*if (driver.mName.Contains("Andrei"))
-					{
-						NOP!();
-					}*/
-
 					if (driver.mCalcLapDistPct < 0)
 						timeDiff = -1;
 					else if (isAheadOfFocus)
@@ -917,16 +913,21 @@ namespace iBuddy
 
 				if ((refueling) && (irSdk.mDriverCarFuelKgPerLtr > 0))
 				{
-					float estRefuel = (lapsLeft - fuelLapsLeft) * refUsage;
-					estRefuel = LiterToDispUnit(estRefuel);
-
-					float refuelAmt = irSdk.mFuelAddKg;
-					//float refuelAmt = irSdk.mFuelAddKg / irSdk.mDriverCarFuelKgPerLtr;
-					refuelAmt = LiterToDispUnit(refuelAmt); // L to G
-
-					float fuelDiff = refuelAmt - estRefuel;
+					float fuelDiff = mRefuelAddAmt - mRefuelSimAmt;
 					String deltaStr = ((fuelDiff > 0) ? "+" : "");
-					g.DrawString(scope $"Refuel {refuelAmt:0.00} ({deltaStr}{fuelDiff:0.00})", 0, 10, .Centered);
+					float fuelAdded = irSdk.mFuelLevel - mRefuelMinStartLevel;
+
+					if ((fuelAdded < 1.0f) || (mRefuelAddAmt <= 0))
+						g.DrawString(scope $"Refuel {LiterToDispUnit(mRefuelAddAmt):0.00} ({deltaStr}{LiterToDispUnit(fuelDiff):0.00})", 0, 10, .Centered);
+					else
+					{
+						uint32 refuelColor = 0xFFFFFFFF;
+						float fuelPct = (fuelAdded + 0.1f) / mRefuelAddAmt;
+						if (fuelPct >= 0.85f)
+							refuelColor = 0xFF00FF00;
+						using (g.PushColor(refuelColor))
+							g.DrawString(scope $"Refuel {(Math.Clamp(fuelPct, 0, 1) * 100.0f):0.0}% ({deltaStr}{LiterToDispUnit(fuelDiff):0.00})", 0, 10, .Centered);
+					}
 				}
 				else if (isMultiline)
 				{
@@ -1498,6 +1499,7 @@ namespace iBuddy
 				if ((onPitRoad) && (!mWasOnPitRoad))
 				{
 					mRefuelStartLevel = irSdk.mFuelLevel;
+					mRefuelMinStartLevel = irSdk.mFuelLevel;
 
 					double curLap = focusedDriver.mCalcLap + focusedDriver.mCalcLapDistPct;
 
@@ -1507,6 +1509,11 @@ namespace iBuddy
 					mRefuelSimAmt = wantAddFuel;
 					mRefuelEstLaps = mSimEstEndLap;
 				}
+				else if (onPitRoad)
+				{
+					mRefuelMinStartLevel = Math.Min(irSdk.mFuelLevel, mRefuelMinStartLevel);
+				}
+
 				mWasOnPitRoad = onPitRoad;
 			}
 			

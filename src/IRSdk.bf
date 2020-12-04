@@ -516,6 +516,8 @@ namespace iRacing
 		public String mSessionType = new .() ~ delete _;
 		public PaceMode mPaceMode;
 		public SessionState mSessionState;
+		public int32 mInvalidStateCount;
+		public int32 mHighestInvalidStateCount;
 		public SessionFlags mSessionFlags;
 		public int32 mRadioTransmitCarIdx;
 		public float mLapBestLapTime;
@@ -944,6 +946,31 @@ namespace iRacing
 			if (!GetNewData())
 				return;
 
+			//
+			SessionState sessionState;
+			{
+				int32 sessionStateI = 0;
+				GetVarVal("SessionState", ref sessionStateI);
+				sessionState = (.)sessionStateI;
+			}
+
+			if (sessionState == .StateInvalid)
+			{
+				mInvalidStateCount++;
+
+				mMaxIncidentCount = Math.Max(mMaxIncidentCount, mInvalidStateCount);
+
+				if (mInvalidStateCount < 120)
+				{
+					// Retain non-invalid state for a while
+					return;
+				}
+			}
+			else
+			{
+				mInvalidStateCount = 0;
+			}
+
 			int lineNum = 0;
 			if (mHeader.sessionInfoUpdate != mLastSessionUpdate)
 			{
@@ -1215,8 +1242,6 @@ namespace iRacing
 			GetVarVal("CamCarIdx", ref mCamCarIdx);
 			GetVarVal("RaceLaps", ref mRaceLaps);
 			GetVarVal("RadioTransmitCarIdx", ref mRadioTransmitCarIdx);
-			int32 sessionState = 0;
-			GetVarVal("SessionState", ref sessionState);
 			mSessionState = (.)sessionState;
 			int32 paceMode = 4;
 			int32 sessionFlags = 0;
@@ -1377,7 +1402,7 @@ namespace iRacing
 							mFinishedRace = true;
 					}
 				}
-				else if ((driver.mLap >= 0) && (driver.mLap < driver.mCalcLap))
+				else if ((driver.mLap >= 0) && (driver.mLapDistPct > 0) && (driver.mLap < driver.mCalcLap))
 				{
 					driver.mCalcLap = driver.mLap;
 				}
