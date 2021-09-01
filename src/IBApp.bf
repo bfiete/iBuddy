@@ -11,6 +11,7 @@ using Beefy.input;
 using System.Diagnostics;
 using System.Collections;
 using System.IO;
+using System.Threading;
 
 namespace iBuddy
 {
@@ -23,11 +24,15 @@ namespace iBuddy
 			Compare
 		}
 
+		public Monitor mMonitor = new .() ~ delete _;
 		public IRSdk mIRSdk ~ delete _;
 
+		public InputDevice mWheelbaseInputDevice ~ delete _;
+		public InputDevice mWheelInputDevice ~ delete _;
+		public InputDevice mPedalsInputDevice ~ delete _;
 		public InputManager mInputManager ~ delete _;
-		public InputDevice mInputDevice ~ delete _;
-
+		public SimInputManager mSimInputManager ~ delete _;
+		
 		public WidgetWindow mBoardWindow;
 		public Board mBoard;
 
@@ -47,6 +52,10 @@ namespace iBuddy
 		public Image mMapPointerImage ~ delete _;
 		public Image mChevronImage ~ delete _;
 		public LapInputState mLapInputState;
+		public Capture mCapture = new .() ~ delete _;
+
+		[CallingConvention(.Stdcall), CLink]
+		public static extern void VJoy_Set(int x, int y, int z, int btns);
 
 		public this()
 		{
@@ -88,31 +97,63 @@ namespace iBuddy
 
 			mConfigWidget = new .();
 			mConfigWindow = new WidgetWindow(null, "iBuddy Config", GetWindowX(320), 660, 320, 240, .QuitOnClose | .Caption | .SysMenu | .Minimize, mConfigWidget);
+
+			mSimInputManager = new SimInputManager();
 		}
 
 		public void CheckInputDevices()
 		{
-			if (mInputDevice != null)
+			/*Stopwatch sw = scope .();
+			sw.Start();
+			defer
 			{
-				String state = scope .();
-				mInputDevice.GetState(state);
-				//Debug.WriteLine("InputState: {}", state);
+				sw.Stop();
+				Debug.WriteLine($"CheckInputDevices time : {sw.ElapsedMilliseconds}");
+			}*/
 
-				if (state.StartsWith("!"))
+			void CheckInputDevice(ref InputDevice inputDevice)
+			{
+				if (inputDevice != null)
 				{
-					DeleteAndNullify!(mInputDevice);
+					String state = scope .();
+					inputDevice.GetState(state);
+					if (state.StartsWith("!"))
+					{
+						using (mMonitor.Enter())
+							DeleteAndNullify!(inputDevice);
+					}
+
+					//Debug.WriteLine($"State: {state}");
 				}
 			}
 
-			if (mInputDevice == null)
+			void CreateInputDevice(ref InputDevice inputDevice, StringView prodName, StringView guid)
+			{
+				if (inputDevice != null)
+					return;
+				using (mMonitor.Enter())
+				{
+					inputDevice = mInputManager.CreateInputDevice(prodName, guid);
+					if (inputDevice != null)
+					{
+						String state = scope .();
+						inputDevice.GetState(state);
+					}
+				}
+			}
+
+			CheckInputDevice(ref mWheelbaseInputDevice);
+			CheckInputDevice(ref mWheelInputDevice);
+			CheckInputDevice(ref mPedalsInputDevice);
+
+			if ((mWheelInputDevice == null) || (mWheelbaseInputDevice == null))
 			{
 				String devices = scope .();
+				mInputManager.CachedEnumerateInputDevices(devices);
+				//mInputManager.EnumerateInputDevices(devices);
 
-				/*Stopwatch sw = scope .();
-				sw.Start();*/
-				mInputManager.EnumerateInputDevices(devices);
-				/*sw.Stop();
-				Debug.WriteLine($"{sw.ElapsedMilliseconds}");*/
+				String bestProdName = scope .();
+				String bestGuid = scope .();
 
 				for (var dev in devices.Split('\n'))
 				{
@@ -123,14 +164,23 @@ namespace iBuddy
 					StringView instName = e.GetNext();
 					StringView prodName = e.GetNext();
 					StringView guid = e.GetNext();
-					if (prodName.StartsWith("Simucube 2"))
+
+					bool isBest = false;
+					if (prodName.StartsWith("Ascher Racing F64"))
 					{
-						mInputDevice = mInputManager.CreateInputDevice(guid);
-						if (mInputDevice != null)
-						{
-							String state = scope .();
-							mInputDevice.GetState(state);
-						}
+						CreateInputDevice(ref mWheelInputDevice, prodName, guid);
+					}
+					else if (prodName.StartsWith("GSI Steering Wheel"))
+					{
+						CreateInputDevice(ref mWheelInputDevice, prodName, guid);
+					}
+					else if (prodName.StartsWith("Simucube 2"))
+					{
+						CreateInputDevice(ref mWheelbaseInputDevice, prodName, guid);
+					}
+					else if (prodName.StartsWith("HE SIM PEDALS"))
+					{
+						CreateInputDevice(ref mPedalsInputDevice, prodName, guid);
 					}
 				}
 			}
@@ -248,6 +298,15 @@ namespace iBuddy
 
 			if (mUpdateCnt % 60 == 0)
 				CheckInputDevices();
+
+			/*if ((mPedalsInputDevice != null) && (mUpdateCnt % 60 == 0))
+			{
+				String state = scope .();
+				mPedalsInputDevice.GetState(state);
+				Debug.WriteLine($"Pedal state: {state}");
+			}*/
+
+			mSimInputManager.Update();
 		}
 
 		public void Fail(StringView str)

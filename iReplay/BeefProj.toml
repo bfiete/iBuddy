@@ -1,0 +1,15 @@
+FileVersion = 1
+Dependencies = {corlib = "*", Beefy2D = "*"}
+
+[Project]
+Name = "iReplay"
+TargetType = "BeefGUIApplication"
+StartupObject = "iReplay.Program"
+
+[Configs.Debug2.Win64]
+DebugCommandArguments = "C:\\proj\\iBuddy\\dist\\replay\\2021_04_03__12_45.dat"
+
+[Configs.Debug.Win64]
+TargetDirectory = "$(WorkspaceDir)\\..\\dist"
+TargetName = "$(ProjectName)_d"
+DebugCommandArguments = "C:\\proj\\iBuddy\\dist\\replay\\2021_04_12__15_02.dat"

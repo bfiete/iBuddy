@@ -12,3 +12,4 @@ IconFile = "icon.ico"
 [Configs.Debug.Win64]
 TargetDirectory = "$(WorkspaceDir)\\dist"
 TargetName = "$(ProjectName)_d"
+LibPaths = ["$(WorkspaceDir)\\dist\\iBuddyHelper.lib"]

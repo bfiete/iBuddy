@@ -75,15 +75,26 @@ namespace iBuddy
 			public float mCrudeTimeDiff;
 		}
 
+		public enum PitStopState
+		{
+			None,
+			Approach,
+			Slowing,
+			Slowed,
+			Lane
+		}
+
 		public Track mTrack ~ delete _;
 		public List<DriverInfo> mDriverInfo = new .() ~ DeleteContainerAndItems!(_);
-		float mMouseDownX;
-		float mMouseDownY;
-		bool mWantStandingDisplay;
-		RaceSim mRefRaceSim ~ delete _;
-		List<int32> mSimEndLaps = new .() ~ delete _;
-		int32 mSimEstEndLap;
-		float mSimEstEndLapAvg;
+		public float mMouseDownX;
+		public float mMouseDownY;
+		public bool mWantStandingDisplay;
+		public PitStopState mPitstopState;
+		public bool mPitstopHelperDown;
+		public RaceSim mRefRaceSim ~ delete _;
+		public List<int32> mSimEndLaps = new .() ~ delete _;
+		public int32 mSimEstEndLap;
+		public float mSimEstEndLapAvg;
 
 		public bool mWasOnPitRoad;
 		public float mRefuelAddAmt;
@@ -855,7 +866,7 @@ namespace iBuddy
 				return;
 
 			bool refueling = irSdk.mFuelFill > 0;
-
+			
 			float fuelLevel = irSdk.mFuelLevel;
 
 			float maxTank = irSdk.mDriverCarFuelMax;
@@ -863,6 +874,9 @@ namespace iBuddy
 			float lapsLeft = GetLapsLeft();
 			float refUsage = GetRefFuelUsage();
 			float needFuel = refUsage * Math.Ceiling(lapsLeft);
+
+			/*refueling = true;
+			refUsage = 1;*/
 
 			if (refUsage > 0)
 			{
@@ -990,6 +1004,10 @@ namespace iBuddy
 			bool isQualifying = session.mKind == .Qualify;
 			bool drawRel = !isQualifying && (session.mKind != .Testing) && (!mWantStandingDisplay);
 			bool drawMap = !isQualifying && (session.mKind != .Testing) && (focusIdx >= 0) && (mTrack != null);
+
+			if ((session.mKind == .Race) && (focusDriver.mLap == 0) && (irSdk.mSessionTimeRemain >= 0) && (irSdk.mSessionTimeRemain < 120))
+				drawMap = false;
+
 			float topRowY = 40;
 			float botRowY = mHeight - 32;
 			float relDriverY = 188;
@@ -1038,7 +1056,23 @@ namespace iBuddy
 
 			if (drawMap)
 				DrawMap(g, trackOrderList, focusIdx);
+			else if (session.mKind == .Race)
+			{
+				if ((irSdk.mFuelLevel < 20) && (focusDriver.IsOnTrack))
+				{
+					using (g.PushColor(Color.Get(0xFF0000, (0.8f + Math.Sin(mUpdateCnt * 0.12f) * 0.2f))))
+						g.FillRect(0, 0, mWidth, 40);
+				}
 
+				String setupName = scope .();
+				setupName.Append(irSdk.mDriverSetupName);
+				if (irSdk.mDriverSetupIsModified)
+					setupName.Append(" (modified)");
+				g.SetFont(gApp.mMedFont);
+				g.DrawString(setupName, mWidth / 2, 12, .Centered);
+			}
+
+			g.SetFont(gApp.mLgMonoFont);
 			if ((drawRel) && (focusDriver.IsOnTrack) && (!trackOrderList.IsEmpty) && (mTrack != null))
 			{
 				/*for (int i < drawAround * 2 + 1)
@@ -1178,7 +1212,6 @@ namespace iBuddy
 						break;
 					drawIdx++;
 				}
-
 			}
 
 			g.SetFont(gApp.mLgMonoFont);
@@ -1188,7 +1221,11 @@ namespace iBuddy
 			if (timeLeft < 0) // Show total session time
 				timeLeft = session.mTime;
 
-			if (session.mTime == 0)
+			float sessionTime = session.mTime;
+			if (session.mKind == .Testing)
+				sessionTime = 0;
+
+			if (sessionTime == 0)
 				timeLeft = irSdk.mSessionTime;
 
 			TimeSpan ts = TimeSpan((.)(timeLeft * TimeSpan.TicksPerSecond));
@@ -1198,13 +1235,14 @@ namespace iBuddy
             else
 				timeLeftStr.AppendF($"{ts:mm\\:ss}");
 
-			if ((irSdk.mSessionState == .StateCheckered) || (irSdk.mSessionState == .StateCoolDown))
+			if ((session.mKind == .Race) &&
+				((irSdk.mSessionState == .StateCheckered) || (irSdk.mSessionState == .StateCoolDown)))
 			{
 				timeLeftStr.Set("-");
 			}
 
-			if (session.mTime > 0)
-				timeLeftStr.AppendF($" / {(int)(session.mTime / 60)}m");
+			if (sessionTime > 0)
+				timeLeftStr.AppendF($" / {(int)(sessionTime / 60)}m");
 
 			String sessionKindStr = scope .(64);
 			if (session.mKind == .Unknown)
@@ -1244,7 +1282,25 @@ namespace iBuddy
 			g.SetFont(gApp.mMedFont);
 			g.DrawString("Brian Fiete 01:42:382", 60, 60);*/
 
+			if (mPitstopState != .None)
+			{
+				float width = 100;
 
+				using (g.PushColor(Color.Get(0xFF0000, (0.6f + Math.Sin(mUpdateCnt * 0.12f) * 0.1f))))
+					g.FillRect(0, 0, width, 40);
+
+				String stateString = scope .();
+				mPitstopState.ToString(stateString);
+				stateString.AppendF($" {gApp.mSimInputManager.mThrottle:0.000}");
+
+				/*if (gApp.mSimInputManager.mClutch.mOverride != null)
+				{
+					stateString.AppendF($" {(int)(gApp.mSimInputManager.mClutch.mOverride.Value * 100)}");
+				}*/
+
+				g.SetFont(gApp.mMedFont);
+				g.DrawString(stateString, 0, 12, .Centered, width);
+			}
 		}
 
 		void UpdateTrackPct(float refLapTime)
@@ -1470,14 +1526,53 @@ namespace iBuddy
 			var irSdk = gApp.mIRSdk;
 
 			mWantStandingDisplay = mWidgetWindow.IsKeyDown(.Shift);
+			bool pitstopHelperDown = mWidgetWindow.IsKeyDown((.)'P');
 
-			if (gApp.mInputDevice != null)
+			if (gApp.mWheelbaseInputDevice != null)
 			{
 				String state = scope .();
-				gApp.mInputDevice.GetState(state);
+				gApp.mWheelbaseInputDevice.GetState(state);
+
+				// Simucube 2
+				
 				if (state.Contains("Btn\t24"))
 					mWantStandingDisplay = true;
 			}
+
+			if (gApp.mWheelInputDevice != null)
+			{
+				String state = scope .();
+				gApp.mWheelInputDevice.GetState(state);
+
+				if (gApp.mWheelInputDevice.mProdName == "Ascher Racing F64")
+				{
+					if (state.Contains("Btn\t6"))
+						mWantStandingDisplay = true;
+
+					if (state.Contains("Btn\t7"))
+						pitstopHelperDown = true;
+
+					/*if (mUpdateCnt % 60 == 0)
+						Debug.WriteLine($"State: {state}");*/
+				}
+				else if (gApp.mWheelInputDevice.mProdName == "GSI Steering Wheel")
+				{
+					if (state.Contains("Btn\t1\n"))
+						mWantStandingDisplay = true;
+
+					/*if (mUpdateCnt % 60 == 0)
+						Debug.WriteLine($"State: {state}");*/
+				}
+			}
+
+			if ((pitstopHelperDown) && (!mPitstopHelperDown))
+			{
+				if (mPitstopState == .None)
+					mPitstopState = .Approach;
+				else
+					mPitstopState = .None;
+			}
+			mPitstopHelperDown = pitstopHelperDown;
 
 			if ((mTrack == null) || (mTrack.mName != irSdk.mTrackName))
 			{
@@ -1686,6 +1781,15 @@ namespace iBuddy
 			base.MouseDown(x, y, btn, btnCount);
 			mMouseDownX = x;
 			mMouseDownY = y;
+
+			MouseMove(x, y);
+		}
+
+		public override void MouseUp(float x, float y, int32 btn)
+		{
+			base.MouseUp(x, y, btn);
+
+			MouseMove(x, y);
 		}
 
 		public override void MouseMove(float x, float y)
@@ -1698,6 +1802,11 @@ namespace iBuddy
 				float winY = y - mMouseDownY + mWidgetWindow.mClientY;
 				mWidgetWindow.SetClientPosition(winX, winY);
 			}
+
+			//IBApp.VJoy_Set((int)(x / mWidth * 0x7FFF), 0, (int)(y / mHeight * 0x7FFF), (.)mMouseFlags);
+			//IBApp.VJoy_Set((int)(x / mWidth * 0x7FFF), 0, 0, (.)mMouseFlags);
+			//IBApp.VJoy_Set(0, (int)(x / mWidth * 0x7FFF), 0, (.)mMouseFlags);
+			//IBApp.VJoy_Set(0, 0, (int)(x / mWidth * 0x7FFF), (.)mMouseFlags);
 		}
 	}
 }

@@ -1,0 +1,6 @@
+FileVersion = 1
+Projects = {iReplay = {Path = "."}, Beefy2D = "*"}
+Unlocked = ["corlib"]
+
+[Workspace]
+StartupProject = "iReplay"

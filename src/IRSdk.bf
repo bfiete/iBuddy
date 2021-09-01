@@ -3,6 +3,7 @@ using System.Collections;
 using iBuddy;
 using System.Diagnostics;
 using System.IO;
+using Beefy.geom;
 
 namespace iRacing
 {
@@ -477,6 +478,7 @@ namespace iRacing
 			public Stopwatch mTimer ~ delete _;
 			public uint8* mDataPrev ~ delete _;
 			public uint8* mDataCur ~ delete _;
+			public int32 mImageSize;
 		}
 
 		StreamRecordInfo mStreamRecordInfo ~ delete _;
@@ -505,6 +507,8 @@ namespace iRacing
 		public float mSpeed;
 		public float mDriverCarFuelMax;
 		public float mDriverCarFuelKgPerLtr;
+		public String mDriverSetupName = new .() ~ delete _;
+		public bool mDriverSetupIsModified;
 		public float mFuelLevel;
 		public float mLastLapFuelLevel;
 		public float mFuelAddKg;
@@ -532,6 +536,7 @@ namespace iRacing
 		public double mSessionTimeRemain;
 		public float mAirTemp;
 		public float mTrackTempCrew;
+		public float mPitSpeedLimit;
 		public float mTrackLength;
 		public String mTrackName = new .() ~ delete _;
 		public bool mGuessWhiteFlagged;
@@ -691,6 +696,11 @@ namespace iRacing
 
 		public void StopRecording()
 		{
+			if (mStreamRecordInfo != null)
+			{
+				Debug.WriteLine($"Recorded {mStreamRecordInfo.mFile.Length/1024}k with {mStreamRecordInfo.mImageSize/1024}k of image data");
+			}
+
 			DeleteAndNullify!(mStreamRecordInfo);
 		}
 
@@ -782,6 +792,8 @@ namespace iRacing
 		public void GetYamlVal(StringView line, ref float val)
 		{
 			int colonPos = line.IndexOf(':');
+			if (colonPos + 2 >= line.Length)
+				return;
 			if (float.Parse(line.Substring(colonPos + 2)) case .Ok(var parsedVal))
 				val = parsedVal;
 		}
@@ -789,6 +801,8 @@ namespace iRacing
 		public void GetYamlVal(StringView line, ref int32 val)
 		{
 			int colonPos = line.IndexOf(':');
+			if (colonPos + 2 >= line.Length)
+				return;
 			if (int32.Parse(line.Substring(colonPos + 2)) case .Ok(var parsedVal))
 				val = parsedVal;
 		}
@@ -796,6 +810,8 @@ namespace iRacing
 		public void GetYamlVal(StringView line, String val)
 		{
 			int colonPos = line.IndexOf(':');
+			if (colonPos + 2 >= line.Length)
+				return;
 			val.Append(StringView(line, colonPos + 2));
 		}
 
@@ -927,7 +943,28 @@ namespace iRacing
 			}
 
 			if (mStreamRecordInfo != null)
+			{
 				WriteFrame();
+
+				gApp.mCapture.mWantImage = true;
+				using (gApp.mCapture.mMonitor.Enter())
+				{
+					if (!gApp.mCapture.mImage.IsEmpty)
+					{
+						mStreamRecordInfo.mImageSize += (int32)gApp.mCapture.mImage.Count;
+
+						mStreamRecordInfo.mFile.Write((int32)-1);
+						mStreamRecordInfo.mFile.Write((int32)gApp.mCapture.mImage.Count);
+						mStreamRecordInfo.mFile.Write((Span<uint8>)gApp.mCapture.mImage);
+
+						gApp.mCapture.mImage.Clear();
+					}
+				}
+			}
+			else
+			{
+				gApp.mCapture.mWantImage = false;
+			}
 
 			mVarMap.Clear();
 			mHeader = (Header*)mSharedMemory;
@@ -992,6 +1029,17 @@ namespace iRacing
 					{
 						GetYamlVal(line, ref mDriverCarFuelKgPerLtr);
 					}
+					else if (line.StartsWith(" DriverSetupName"))
+					{
+						mDriverSetupName.Clear();
+						GetYamlVal(line, mDriverSetupName);
+					}
+					else if (line.StartsWith(" DriverSetupIsModified"))
+					{
+						int32 isModified = 0;
+						GetYamlVal(line, ref isModified);
+						mDriverSetupIsModified = isModified != 0;
+					}
 					else if (line.StartsWith("   SessionType:"))
 					{
 						mSessionType.Clear();
@@ -1014,6 +1062,18 @@ namespace iRacing
 							}
 						}
 					}
+					else if (line.StartsWith(" TrackPitSpeedLimit:"))
+					{
+						String trackLen = scope .();
+						GetYamlVal(line, trackLen);
+						if (trackLen.EndsWith(" kph"))
+						{
+							trackLen.RemoveFromEnd(" kph".Length);
+							if (float.Parse(trackLen) case .Ok(out mPitSpeedLimit))
+							{
+							}
+						}
+					}
 					else if (line.StartsWith("  IncidentLimit:"))
 					{
 						GetYamlVal(line, ref mMaxIncidentCount);
@@ -1022,15 +1082,17 @@ namespace iRacing
 					{
 						int32 carNum = -1;
 						GetYamlVal(line, ref carNum);
-
-						driver = mDrivers[carNum];
-						if (driver == null)
+						if (carNum != -1)
 						{
-							driver = new Driver();
-							driver.mIdx = carNum;
-							mDrivers[carNum] = driver;
+							driver = mDrivers[carNum];
+							if (driver == null)
+							{
+								driver = new Driver();
+								driver.mIdx = carNum;
+								mDrivers[carNum] = driver;
+							}
+							driver.mLastSessionId = mHeader.sessionInfoUpdate;
 						}
-						driver.mLastSessionId = mHeader.sessionInfoUpdate;
 					}
 					else if (line.StartsWith(" - SessionNum:"))
 					{
@@ -1200,12 +1262,12 @@ namespace iRacing
 					{
 						if (line.StartsWith("     LastTime:"))
 						{
-							Debug.Assert(sessionDriverInfo.mLastLapTime <= 0);
+							//Debug.Assert(sessionDriverInfo.mLastLapTime <= 0);
 							GetYamlVal(line, ref sessionDriverInfo.mLastLapTime);
 						}
 						else if (line.StartsWith("     FastestTime:"))
 						{
-							Debug.Assert(sessionDriverInfo.mBestLapTime <= 0);
+							//Debug.Assert(sessionDriverInfo.mBestLapTime <= 0);
 							GetYamlVal(line, ref sessionDriverInfo.mBestLapTime);
 						}
 						else if (line.StartsWith("     Incidents:"))
@@ -1309,6 +1371,11 @@ namespace iRacing
 				driver.mCalcClassPosition = driver.mClassPosition;
 				GetVarVal("CarIdxLap", ref driver.mLap, @driver.Index);
 				GetVarVal("CarIdxOnPitRoad", ref driver.mOnPitRoad, @driver.Index);
+
+				Vector3 vel = default;
+				GetVarVal("VelocityX", ref vel.mX);
+				GetVarVal("VelocityY", ref vel.mY);
+				GetVarVal("VelocityZ", ref vel.mZ);
 
 				if (driver.mLapDistPct >= 0)
 				{
@@ -1774,7 +1841,8 @@ namespace iRacing
 					}
 
 					float fudgeFactor = ((classData.mCarCount - (classData.mDNSCount/2.0f))/2.0f-driver.mCalcClassPosition)/100.0f;
-					driver.mIRatingChange = (classData.mCarCount - driver.mCalcClassPosition - expectedScore - fudgeFactor) * 200 / (classData.mCarCount-classData.mDNSCount);
+					if (driver.mIRating > 1)
+						driver.mIRatingChange = (classData.mCarCount - driver.mCalcClassPosition - expectedScore - fudgeFactor) * 200 / (classData.mCarCount-classData.mDNSCount);
 					if (classData.mCarCount < 2)
 						driver.mIRatingChange = 0;
 				}
